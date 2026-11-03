@@ -235,12 +235,43 @@ def notarize(signed: Path) -> None:
             time.sleep(10)
 
 
+def preflight() -> None:
+    """Check pinned metadata and signer access without signing or contacting Apple."""
+    if backend() != "signer-service":
+        raise ValueError("Notarization preflight requires signer-service backend")
+    key = notarization_key()
+    if key.signer is None:
+        raise ValueError("Notarization preflight requires signer-service backend")
+    key.signer.preflight()
+    print(
+        "Notarization preflight passed: exact Azure metadata version and "
+        "signer-service public key verified; no signing or Apple submission performed."
+    )
+
+
 def main() -> None:
     """Notarize the signed executables from the protected release job."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("signed", type=Path)
+    parser.add_argument("signed", type=Path, nargs="?")
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help=(
+            "Verify exact Azure metadata and signer-service OIDC/public-key access "
+            "without signing, creating a ZIP, or contacting Apple; also enabled by "
+            "PREFLIGHT_ONLY=true (signed directory not required)"
+        ),
+    )
     args = parser.parse_args()
     try:
+        preflight_only = os.environ.get("PREFLIGHT_ONLY", "false")
+        if preflight_only not in {"true", "false"}:
+            raise ValueError("PREFLIGHT_ONLY must be true or false")
+        if args.preflight or preflight_only == "true":
+            preflight()
+            return
+        if args.signed is None:
+            parser.error("signed is required unless preflight is enabled")
         notarize(args.signed)
     except (KeyError, OSError, ValueError, RuntimeError, TimeoutError) as error:
         parser.exit(1, f"{error}\n")

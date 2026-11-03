@@ -85,9 +85,13 @@ class Signer:
             f"https://{vault}.vault.azure.net/keys/{name}/{self.metadata_key_version}"
         )
 
-    def sign_digest(self, digest: bytes) -> bytes:
-        require(len(digest) == 32, "Notarization requires one SHA-256 digest")
+    def preflight(self) -> None:
+        """Authenticate and verify the pinned public key without signing anything."""
         token = oidc_token(f"https://{self.hostname}")
+        self.validate_public_key(token)
+
+    def validate_public_key(self, token: str) -> None:
+        """Require the exact independently pinned key and signing algorithm."""
         keys = self.rpc("GetPublicKeys", {"purpose": self.purpose}, token).get(
             "publicKeys"
         )
@@ -106,6 +110,11 @@ class Signer:
             == self.spki_sha256,
             "Notarization public key differs from the independent pin",
         )
+
+    def sign_digest(self, digest: bytes) -> bytes:
+        require(len(digest) == 32, "Notarization requires one SHA-256 digest")
+        token = oidc_token(f"https://{self.hostname}")
+        self.validate_public_key(token)
         result = self.rpc(
             "Sign",
             {
