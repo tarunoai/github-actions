@@ -2,6 +2,9 @@ name: "Sign and notarize macOS executables"
 description: "Sign all target directories through the selected PKCS#11 backend and wait for Apple notarization."
 
 inputs:
+  preflight-only:
+    description: "When true, verify downloads and selected signer-service keys without signing or submitting to Apple. Requires signing-backend: signer-service; also checks notarization when notarization-backend: signer-service."
+    default: "false"
   unsigned-directory:
     description: "Directory containing one subdirectory per target, with that target's executables."
     required: true
@@ -130,6 +133,7 @@ runs:
         COMPONENT_PKCS11_SHA256: ${{ inputs.component-pkcs11-sha256 }}
         AZURE_CREDENTIAL_KIND: azurecli
         SIGNING_BACKEND: ${{ inputs.signing-backend }}
+        PREFLIGHT_ONLY: ${{ inputs.preflight-only }}
         SIGNER_SERVICE_ENDPOINT: ${{ inputs.signer-service-endpoint }}
         SIGNER_SERVICE_PURPOSE: ${{ inputs.signer-service-purpose }}
         SIGNER_SERVICE_KEY_ID: ${{ inputs.signer-service-key-id }}
@@ -147,6 +151,7 @@ runs:
       run: bash "$ACTION_PATH/scripts/notary_signer/install_grpcurl.sh"
 
     - name: "Notarize signed macOS executables"
+      if: ${{ inputs.preflight-only != 'true' || inputs.notarization-backend == 'signer-service' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
@@ -154,6 +159,7 @@ runs:
         AZURE_KEYVAULT_NAME: ${{ inputs.azure-keyvault-name }}
         APPLE_NOTARIZATION_AKV_KEY_NAME: ${{ inputs.apple-notarization-akv-key-name }}
         APPLE_NOTARIZATION_BACKEND: ${{ inputs.notarization-backend }}
+        PREFLIGHT_ONLY: ${{ inputs.preflight-only }}
         APPLE_NOTARIZATION_AKV_KEY_VERSION: ${{ inputs.apple-notarization-akv-key-version }}
         SIGNER_SERVICE_ENDPOINT: ${{ inputs.signer-service-endpoint }}
         NOTARIZATION_SIGNER_SERVICE_PURPOSE: ${{ inputs.notarization-signer-service-purpose }}
