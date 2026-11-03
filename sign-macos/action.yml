@@ -68,6 +68,21 @@ inputs:
   apple-notarization-akv-key-name:
     description: "Azure Key Vault key for App Store Connect, tagged with apple-key-id and apple-issuer-id."
     required: true
+  notarization-backend:
+    description: "Apple JWT signing backend: azure or signer-service. Independent of signing-backend."
+    default: "azure"
+  apple-notarization-akv-key-version:
+    description: "Exact Azure key version supplying Apple metadata. Required for signer-service notarization."
+    default: ""
+  notarization-signer-service-purpose:
+    description: "Authorized Astral notarization purpose. Required for signer-service notarization."
+    default: ""
+  notarization-signer-service-key-id:
+    description: "Exact notarization key ID matching the pinned Azure metadata key version."
+    default: ""
+  notarization-signer-service-spki-sha256:
+    description: "Independent SHA-256 of the notarization public key's DER SPKI. Required for signer-service notarization."
+    default: ""
 
 runs:
   using: "composite"
@@ -124,6 +139,13 @@ runs:
         CERTIFICATE_SHA256: ${{ inputs.certificate-sha256 }}
       run: uv run --locked "$ACTION_PATH/scripts/sign-release-macos.py" "$UNSIGNED_DIRECTORY" "$SIGNED_DIRECTORY"
 
+    - name: "Install pinned notarization grpcurl"
+      if: ${{ inputs.notarization-backend == 'signer-service' }}
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "$ACTION_PATH/scripts/notary_signer/install_grpcurl.sh"
+
     - name: "Notarize signed macOS executables"
       shell: bash
       env:
@@ -131,4 +153,10 @@ runs:
         SIGNED_DIRECTORY: ${{ inputs.signed-directory }}
         AZURE_KEYVAULT_NAME: ${{ inputs.azure-keyvault-name }}
         APPLE_NOTARIZATION_AKV_KEY_NAME: ${{ inputs.apple-notarization-akv-key-name }}
+        APPLE_NOTARIZATION_BACKEND: ${{ inputs.notarization-backend }}
+        APPLE_NOTARIZATION_AKV_KEY_VERSION: ${{ inputs.apple-notarization-akv-key-version }}
+        SIGNER_SERVICE_ENDPOINT: ${{ inputs.signer-service-endpoint }}
+        NOTARIZATION_SIGNER_SERVICE_PURPOSE: ${{ inputs.notarization-signer-service-purpose }}
+        NOTARIZATION_SIGNER_SERVICE_KEY_ID: ${{ inputs.notarization-signer-service-key-id }}
+        NOTARIZATION_SIGNER_SERVICE_SPKI_SHA256: ${{ inputs.notarization-signer-service-spki-sha256 }}
       run: uv run --locked "$ACTION_PATH/scripts/notarize-release-macos.py" "$SIGNED_DIRECTORY"

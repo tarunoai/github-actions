@@ -13,8 +13,8 @@ Standalone executables cannot have tickets stapled to them, so these releases
 rely on that online lookup even when distributed in wheels or archives.
 
 This script uploads all signed macOS targets and waits for Apple's result.
-It authenticates to the Notary API using an App Store Connect key in Azure Key
-Vault, which signs API tokens without exposing the private key.
+It authenticates to the Notary API using Azure Key Vault by default, or an
+explicitly configured signer-service key, without exporting the private key.
 """
 
 import argparse
@@ -35,19 +35,21 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
+from notary_signer.client import Signer, backend
 
 NOTARY_URL = "https://appstoreconnect.apple.com/notary/v2/submissions"
 
 
 @dataclass(frozen=True, kw_only=True)
 class NotarizationKey:
-    """An App Store Connect key in Azure Key Vault."""
+    """Apple account metadata and the selected remote signing backend."""
 
     # Versioned Azure Key Vault URL used for signing. Azure CLI authenticates
     # requests using the workflow's existing Azure login.
     url: str
     key_id: str
     issuer: str
+    signer: Signer | None = None
 
 
 def base64url(value: bytes) -> str:
@@ -70,9 +72,12 @@ def azure_json(*arguments: str) -> dict:
 
 
 def notarization_key() -> NotarizationKey:
-    """Resolve the current key version and its Apple key and issuer IDs."""
+    """Resolve Apple metadata, pinned to an exact version for signer-service."""
     vault = os.environ["AZURE_KEYVAULT_NAME"]
     name = os.environ["APPLE_NOTARIZATION_AKV_KEY_NAME"]
+    signer = Signer.from_environment() if backend() == "signer-service" else None
+    version = ("--version", signer.metadata_key_version) if signer else ()
+    expected_url = signer.metadata_url(vault, name) if signer else None
     key = azure_json(
         "keyvault",
         "key",
@@ -81,10 +86,19 @@ def notarization_key() -> NotarizationKey:
         vault,
         "--name",
         name,
+        *version,
         "--query",
         '{url:key.kid,key_id:tags."apple-key-id",issuer:tags."apple-issuer-id"}',
     )
-    return NotarizationKey(url=key["url"], key_id=key["key_id"], issuer=key["issuer"])
+    if signer and key["url"] != expected_url:
+        raise ValueError("Azure returned a different notarization metadata key version")
+    if signer and not all(
+        isinstance(key[field], str) and key[field] for field in ("key_id", "issuer")
+    ):
+        raise ValueError("Azure returned incomplete Apple notarization metadata")
+    return NotarizationKey(
+        url=key["url"], key_id=key["key_id"], issuer=key["issuer"], signer=signer
+    )
 
 
 def apple_token(key: NotarizationKey) -> str:
@@ -102,6 +116,11 @@ def apple_token(key: NotarizationKey) -> str:
         base64url(json.dumps(value, separators=(",", ":")).encode())
         for value in (header, claims)
     )
+    if key.signer:
+        signature = key.signer.sign_digest(
+            hashlib.sha256(signing_input.encode("ascii")).digest()
+        )
+        return f"{signing_input}.{base64url(signature)}"
     signature = azure_json(
         "rest",
         "--method",

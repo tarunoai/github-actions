@@ -1,0 +1,132 @@
+syntax = "proto3";
+
+package oaiproto.security.signer.v1;
+
+/**
+ * Signing algorithm for one concrete key version or signature.
+ */
+enum SigningAlgorithm {
+  // No signing algorithm was provided.
+  SIGNING_ALGORITHM_UNSPECIFIED = 0;
+
+  // RSASSA-PKCS1-v1_5 with SHA-256.
+  SIGNING_ALGORITHM_RSA_PKCS1_SHA256 = 1;
+
+  // Ed25519 as defined by RFC 8032.
+  SIGNING_ALGORITHM_ED25519 = 2;
+
+  // ECDSA P-256 with SHA-256 and a fixed-width, COSE-compatible signature.
+  SIGNING_ALGORITHM_ECDSA_P256_SHA256 = 3;
+
+  // RSASSA-PSS with SHA-256 and MGF1-SHA-256.
+  SIGNING_ALGORITHM_RSA_PSS_SHA256 = 4;
+}
+
+/**
+ * Request to sign caller-provided input for a given logical purpose.
+ *
+ * Exactly one signing input must be provided. Input processing depends on the
+ * currently active key's signing algorithm. RS256, PS256, and ECDSA P-256
+ * accept a full payload or a precomputed SHA-256 digest. ED25519 requires a
+ * full payload.
+ */
+message SignRequest {
+  // Case-insensitive logical purpose to sign for. Signer service will sign using
+  // the currently active key for that key purpose.
+  string purpose = 1;
+
+  oneof signing_input {
+    // Raw bytes to sign. Signer-service hashes the payload and performs any other
+    // algorithm-specific preprocessing required by the currently active key.
+    bytes payload = 2;
+
+    // Precomputed digest to sign directly, without hashing it again. Digest input
+    // is supported for RS256, PS256, and ECDSA P-256 and must contain exactly
+    // 32 bytes.
+    bytes digest = 3;
+  }
+}
+
+/**
+ * Signature bytes returned by the signer service.
+ *
+ * Callers that construct key- or algorithm-dependent signed bytes must use a returned
+ * signature only when {key_id, algorithm} matches the values used to construct those
+ * bytes. On mismatch, callers must discard the signature, rebuild the signed bytes using
+ * the returned pair and retry, or fail closed.
+ */
+message SignResponse {
+  bytes signature = 1;
+
+  // Stable identifier for the exact key version that produced this signature.
+  string key_id = 2;
+
+  // Exact algorithm used to produce this signature. Callers must reject
+  // SIGNING_ALGORITHM_UNSPECIFIED and algorithm values they do not support.
+  SigningAlgorithm algorithm = 3;
+}
+
+/**
+ * Request to fetch the currently valid public verification keys for a purpose.
+ *
+ * The response is intended for verifiers and key distribution flows, not for signing.
+ */
+message GetPublicKeysRequest {
+  // Case-insensitive logical purpose to fetch verification keys for.
+  string purpose = 1;
+}
+
+/**
+ * Verification material for one concrete key version.
+ */
+message VerificationKey {
+  // Field 1 used to describe the rotation lifecycle slot for a given key. Clients should
+  // not depend on this, and should instead trust all VerificationKeys equally.
+  reserved 1;
+  reserved "slot";
+
+  // Stable identifier for this exact key version.
+  string key_id = 2;
+
+  // Public verification key encoded as DER SubjectPublicKeyInfo (SPKI).
+  bytes spki_der = 3;
+
+  // Signing algorithm configured for this exact key version.
+  SigningAlgorithm algorithm = 4;
+
+  // Optional complete self-signed X.509 certificate for this verification key,
+  // encoded as DER. The service returns the persisted certificate bytes, whose
+  // public key matches spki_der. Certificate policy is configured by the signer
+  // operator.
+  optional bytes x509_certificate_der = 5;
+}
+
+/**
+ * Public keys that should be accepted for verification for the requested purpose.
+ *
+ * The service may return multiple keys at once to cover rotation windows. Verifiers
+ * should treat public_keys as a set keyed by key_id and accept any returned key that
+ * matches the requested purpose, its algorithm, and their local verification rules.
+ */
+message GetPublicKeysResponse {
+  repeated VerificationKey public_keys = 1;
+
+  // Suggested cache TTL for verifiers fetching keys directly from signer-service.
+  uint64 cache_ttl_seconds = 2;
+}
+
+/**
+ * Central signing service used by key-purpose-aware systems.
+ *
+ * The service owns key-version selection and rotation visibility. Clients choose a
+ * purpose string, ask the service to sign with the active key for that purpose, and
+ * fetch the public keys needed to verify signatures produced during the current
+ * rotation window.
+ */
+service SignerService {
+  // Signs using the currently active key for the requested purpose.
+  rpc Sign(SignRequest) returns (SignResponse);
+
+  // Returns the set of public keys verifiers should currently accept for the purpose.
+  rpc GetPublicKeys(GetPublicKeysRequest) returns (GetPublicKeysResponse);
+}
