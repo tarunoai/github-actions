@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["boto3"]
+# dependencies = ["astral-dev-toolchain-grpcurl==1.9.4", "boto3"]
 #
 # [tool.uv]
 # no-build = true

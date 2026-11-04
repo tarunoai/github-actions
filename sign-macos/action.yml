@@ -143,13 +143,6 @@ runs:
         CERTIFICATE_SHA256: ${{ inputs.certificate-sha256 }}
       run: uv run --locked "$ACTION_PATH/scripts/sign-release-macos.py" "$UNSIGNED_DIRECTORY" "$SIGNED_DIRECTORY"
 
-    - name: "Install pinned notarization grpcurl"
-      if: ${{ inputs.notarization-backend == 'signer-service' }}
-      shell: bash
-      env:
-        ACTION_PATH: ${{ github.action_path }}
-      run: bash "$ACTION_PATH/scripts/notary_signer/install_grpcurl.sh"
-
     - name: "Notarize signed macOS executables"
       if: ${{ inputs.preflight-only != 'true' || inputs.notarization-backend == 'signer-service' }}
       shell: bash
