@@ -2,44 +2,36 @@ syntax = "proto3";
 
 package oaiproto.security.signer.v1;
 
-// Minimal client schema for notarization. Field numbers and the ES256 enum value
-// match signer-service; other algorithms and response fields are not used here.
 enum SigningAlgorithm {
   SIGNING_ALGORITHM_UNSPECIFIED = 0;
   SIGNING_ALGORITHM_ECDSA_P256_SHA256 = 3;
 }
 
-// A SHA-256 digest signed by the active key for a purpose, without hashing again.
 message SignRequest {
   string purpose = 1;
   bytes digest = 3;
 }
 
-// JOSE R || S signature bytes and the exact key and algorithm used to sign.
 message SignResponse {
   bytes signature = 1;
   string key_id = 2;
   SigningAlgorithm algorithm = 3;
 }
 
-// The purpose whose verification keys should be returned.
 message GetPublicKeysRequest {
   string purpose = 1;
 }
 
-// An exact key version, its DER SubjectPublicKeyInfo, and its signing algorithm.
 message VerificationKey {
   string key_id = 2;
   bytes spki_der = 3;
   SigningAlgorithm algorithm = 4;
 }
 
-// Verification keys available during the purpose's current rotation window.
 message GetPublicKeysResponse {
   repeated VerificationKey public_keys = 1;
 }
 
-// Only the RPCs used to verify the configured key and sign Apple JWT digests.
 service SignerService {
   rpc Sign(SignRequest) returns (SignResponse);
   rpc GetPublicKeys(GetPublicKeysRequest) returns (GetPublicKeysResponse);
