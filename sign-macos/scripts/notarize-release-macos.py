@@ -32,7 +32,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import SplitResult, parse_qsl, urlencode, urlsplit
+from typing import Self
+from urllib.parse import parse_qsl, urlencode, urlsplit
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import boto3
@@ -43,45 +44,44 @@ NOTARY_URL = "https://appstoreconnect.apple.com/notary/v2/submissions"
 SIGNER_ALGORITHM = "SIGNING_ALGORITHM_ECDSA_P256_SHA256"
 
 
-@dataclass(frozen=True)
-class Vault:
-    """An Azure Key Vault name containing only letters, digits, and hyphens."""
+class AzureName(str):
+    """An Azure vault or key name safe to include in a key URL."""
 
-    value: str
-
-    def __post_init__(self) -> None:
-        """Reject names that cannot be used in a Key Vault hostname."""
-        if not re.fullmatch(r"[A-Za-z0-9-]+", self.value):
-            raise ValueError("Invalid Azure Key Vault name")
+    def __new__(cls, value: str) -> Self:
+        """Reject characters outside Azure vault and key names."""
+        if not re.fullmatch(r"[A-Za-z0-9-]+", value):
+            raise ValueError("Invalid Azure vault or key name")
+        return super().__new__(cls, value)
 
 
-@dataclass(frozen=True)
-class KeyName:
-    """An Azure key name containing only letters, digits, and hyphens."""
+class KeyVersion(str):
+    """An exact Azure metadata key version."""
 
-    value: str
+    def __new__(cls, value: str) -> Self:
+        """Validate and normalize an Azure key version."""
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", value):
+            raise ValueError(
+                "Notarization requires an exact Azure metadata key version"
+            )
+        return super().__new__(cls, value.lower())
 
-    def __post_init__(self) -> None:
-        """Reject names that cannot be used in a Key Vault key URL."""
-        if not re.fullmatch(r"[A-Za-z0-9-]+", self.value):
-            raise ValueError("Invalid Azure key name")
+
+class SpkiSha256(str):
+    """An independently configured SHA-256 of DER SubjectPublicKeyInfo."""
+
+    def __new__(cls, value: str) -> Self:
+        """Validate and normalize a public-key fingerprint."""
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+            raise ValueError("Notarization requires an independent SPKI SHA-256 pin")
+        return super().__new__(cls, value.lower())
 
 
-@dataclass(frozen=True, kw_only=True)
-class Signer:
-    """Signer-service configuration pinned to an exact Apple metadata key version."""
+class SignerOrigin(str):
+    """An HTTPS signer-service origin on port 443."""
 
-    endpoint: SplitResult
-    purpose: str
-    key_id: str
-    # Independently supplied SHA-256 of DER SubjectPublicKeyInfo, as hex.
-    spki_sha256: str
-    # Exact Azure key version supplying the matching Apple key and issuer IDs.
-    metadata_key_version: str
-
-    def __post_init__(self) -> None:
-        """Validate the HTTPS origin, public-key pin, and Azure metadata version."""
-        endpoint = self.endpoint
+    def __new__(cls, value: str) -> Self:
+        """Validate the signer origin and normalize its authority."""
+        endpoint = urlsplit(value)
         if not (
             endpoint.scheme == "https"
             and endpoint.hostname
@@ -93,29 +93,42 @@ class Signer:
             and not endpoint.fragment
         ):
             raise ValueError("Notarization requires a signer-service HTTPS origin")
-        if not re.fullmatch(r"[0-9a-fA-F]{64}", self.spki_sha256):
-            raise ValueError("Notarization requires an independent SPKI SHA-256 pin")
-        if not re.fullmatch(r"[0-9a-f]{32}", self.metadata_key_version):
-            raise ValueError(
-                "Notarization requires an exact Azure metadata key version"
-            )
+        host = endpoint.hostname
+        return super().__new__(
+            cls, f"https://[{host}]" if ":" in host else f"https://{host}"
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class Signer:
+    """Signer-service configuration pinned to an exact Apple metadata key version."""
+
+    endpoint: SignerOrigin
+    purpose: str
+    key_id: str
+    spki_sha256: SpkiSha256
+    metadata_key_version: KeyVersion
 
     @classmethod
     def from_environment(cls) -> "Signer":
         """Load the signer configuration and validate it through construction."""
         return cls(
-            endpoint=urlsplit(os.environ["SIGNER_SERVICE_ENDPOINT"]),
+            endpoint=SignerOrigin(os.environ["SIGNER_SERVICE_ENDPOINT"]),
             purpose=os.environ["NOTARIZATION_SIGNER_SERVICE_PURPOSE"],
             key_id=os.environ["NOTARIZATION_SIGNER_SERVICE_KEY_ID"],
-            spki_sha256=os.environ["NOTARIZATION_SIGNER_SERVICE_SPKI_SHA256"],
-            metadata_key_version=os.environ.get(
-                "APPLE_NOTARIZATION_AKV_KEY_VERSION", ""
-            ).lower(),
+            spki_sha256=SpkiSha256(
+                os.environ["NOTARIZATION_SIGNER_SERVICE_SPKI_SHA256"]
+            ),
+            metadata_key_version=KeyVersion(
+                os.environ["APPLE_NOTARIZATION_AKV_KEY_VERSION"]
+            ),
         )
 
-    def metadata_url(self, vault: Vault, name: KeyName) -> str:
+    def metadata_url(self, vault: AzureName, name: AzureName) -> str:
         """Return the exact Azure metadata URL from validated key components."""
-        return f"https://{vault.value}.vault.azure.net/keys/{name.value}/{self.metadata_key_version}"
+        return (
+            f"https://{vault}.vault.azure.net/keys/{name}/{self.metadata_key_version}"
+        )
 
     def validate_public_key(self, token: str) -> None:
         """Verify that signer-service advertises the pinned ES256 public key."""
@@ -131,13 +144,13 @@ class Signer:
             hashlib.sha256(
                 base64.b64decode(matches[0]["spkiDer"], validate=True)
             ).hexdigest()
-            != self.spki_sha256.lower()
+            != self.spki_sha256
         ):
             raise ValueError("Notarization public key differs from the independent pin")
 
     def sign_digest(self, digest: bytes) -> bytes:
         """Sign a SHA-256 digest with the pinned ES256 key and return JOSE bytes."""
-        token = oidc_token(f"https://{self.endpoint.hostname}")
+        token = oidc_token(self.endpoint)
         self.validate_public_key(token)
         result = self.rpc(
             "Sign",
@@ -177,7 +190,7 @@ class Signer:
                     "authorization: Bearer ${NOTARIZATION_OIDC_TOKEN}",
                     "-d",
                     "@",
-                    f"{self.endpoint.hostname}:443",
+                    f"{self.endpoint.removeprefix('https://')}:443",
                     f"oaiproto.security.signer.v1.SignerService/{method}",
                 ],
                 input=json.dumps(body),
@@ -276,8 +289,8 @@ def azure_json(*arguments: str) -> dict:
 
 def notarization_key() -> NotarizationKey:
     """Resolve Apple metadata, pinned to an exact version for signer-service."""
-    vault = Vault(os.environ["AZURE_KEYVAULT_NAME"])
-    name = KeyName(os.environ["APPLE_NOTARIZATION_AKV_KEY_NAME"])
+    vault = AzureName(os.environ["AZURE_KEYVAULT_NAME"])
+    name = AzureName(os.environ["APPLE_NOTARIZATION_AKV_KEY_NAME"])
     backend = os.environ.get("APPLE_NOTARIZATION_BACKEND", "azure")
     if backend not in {"azure", "signer-service"}:
         raise ValueError("Invalid notarization backend")
@@ -287,9 +300,9 @@ def notarization_key() -> NotarizationKey:
         "key",
         "show",
         "--vault-name",
-        vault.value,
+        vault,
         "--name",
-        name.value,
+        name,
         *(("--version", signer.metadata_key_version) if signer else ()),
         "--query",
         '{url:key.kid,key_id:tags."apple-key-id",issuer:tags."apple-issuer-id"}',
@@ -446,9 +459,7 @@ def preflight() -> None:
     key = notarization_key()
     if key.signer is None:
         raise ValueError("Notarization preflight requires signer-service backend")
-    key.signer.validate_public_key(
-        oidc_token(f"https://{key.signer.endpoint.hostname}")
-    )
+    key.signer.validate_public_key(oidc_token(key.signer.endpoint))
     print(
         "Notarization preflight passed: exact Azure metadata version and "
         "signer-service public key verified; no signing or Apple submission performed."
