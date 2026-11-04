@@ -31,7 +31,6 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Self
 from urllib.parse import parse_qsl, urlencode, urlsplit
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -43,25 +42,11 @@ NOTARY_URL = "https://appstoreconnect.apple.com/notary/v2/submissions"
 SIGNER_ALGORITHM = "SIGNING_ALGORITHM_ECDSA_P256_SHA256"
 
 
-class SignerOrigin(str):
-    """An HTTPS signer-service origin on port 443."""
-
-    def __new__(cls, value: str) -> Self:
-        """Validate the signer origin and normalize its authority."""
-        endpoint = urlsplit(value)
-        if endpoint.scheme != "https" or not endpoint.hostname:
-            raise ValueError("Notarization requires a signer-service HTTPS endpoint")
-        host = endpoint.hostname
-        return super().__new__(
-            cls, f"https://[{host}]" if ":" in host else f"https://{host}"
-        )
-
-
 @dataclass(frozen=True, kw_only=True)
 class Signer:
     """Signer-service configuration pinned to an exact Apple metadata key version."""
 
-    endpoint: SignerOrigin
+    hostname: str
     purpose: str
     key_id: str
     # Independently configured SHA-256 of DER SubjectPublicKeyInfo, as hex.
@@ -71,8 +56,9 @@ class Signer:
     @classmethod
     def from_environment(cls) -> "Signer":
         """Load the signer endpoint, key pins, and Azure metadata version."""
+        hostname = urlsplit(os.environ["SIGNER_SERVICE_ENDPOINT"]).hostname
         return cls(
-            endpoint=SignerOrigin(os.environ["SIGNER_SERVICE_ENDPOINT"]),
+            hostname=f"[{hostname}]" if ":" in hostname else hostname,
             purpose=os.environ["NOTARIZATION_SIGNER_SERVICE_PURPOSE"],
             key_id=os.environ["NOTARIZATION_SIGNER_SERVICE_KEY_ID"],
             spki_sha256=os.environ["NOTARIZATION_SIGNER_SERVICE_SPKI_SHA256"].lower(),
@@ -107,7 +93,7 @@ class Signer:
 
     def sign_digest(self, digest: bytes) -> bytes:
         """Sign a SHA-256 digest with the pinned ES256 key and return JOSE bytes."""
-        token = oidc_token(self.endpoint)
+        token = oidc_token(f"https://{self.hostname}")
         self.validate_public_key(token)
         result = self.rpc(
             "Sign",
@@ -124,10 +110,7 @@ class Signer:
             raise ValueError(
                 "Signer returned a different notarization key or algorithm"
             )
-        signature = base64.b64decode(result["signature"], validate=True)
-        if len(signature) != 64:
-            raise ValueError("ES256 signature must contain 64 JOSE R || S bytes")
-        return signature
+        return base64.b64decode(result["signature"], validate=True)
 
     def rpc(self, method: str, body: dict, token: str) -> dict:
         """Call a signer-service RPC and return its decoded JSON response."""
@@ -147,7 +130,7 @@ class Signer:
                     "authorization: Bearer ${NOTARIZATION_OIDC_TOKEN}",
                     "-d",
                     "@",
-                    f"{self.endpoint.removeprefix('https://')}:443",
+                    f"{self.hostname}:443",
                     f"oaiproto.security.signer.v1.SignerService/{method}",
                 ],
                 input=json.dumps(body),
@@ -167,8 +150,6 @@ def oidc_token(audience: str) -> str:
     """Request a GitHub Actions OIDC token for the signer-service audience."""
     url = urlsplit(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"])
     credential = os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
-    if url.scheme != "https":
-        raise ValueError("GitHub OIDC requires HTTPS")
     query = [(key, value) for key, value in parse_qsl(url.query) if key != "audience"]
     query.append(("audience", audience))
     connection = http.client.HTTPSConnection(url.hostname, port=url.port, timeout=15)
@@ -245,10 +226,6 @@ def notarization_key() -> NotarizationKey:
     )
     if signer and key["url"] != signer.metadata_url(vault, name):
         raise ValueError("Azure returned a different notarization metadata key version")
-    if signer and not all(
-        isinstance(key[field], str) and key[field] for field in ("key_id", "issuer")
-    ):
-        raise ValueError("Azure returned incomplete Apple notarization metadata")
     return NotarizationKey(
         url=key["url"], key_id=key["key_id"], issuer=key["issuer"], signer=signer
     )
@@ -390,12 +367,10 @@ def notarize(signed: Path) -> None:
 
 def preflight() -> None:
     """Check pinned metadata and signer access without signing or contacting Apple."""
-    if os.environ.get("APPLE_NOTARIZATION_BACKEND", "azure") != "signer-service":
-        raise ValueError("Notarization preflight requires signer-service backend")
     key = notarization_key()
     if key.signer is None:
         raise ValueError("Notarization preflight requires signer-service backend")
-    key.signer.validate_public_key(oidc_token(key.signer.endpoint))
+    key.signer.validate_public_key(oidc_token(f"https://{key.signer.hostname}"))
     print(
         "Notarization preflight passed: exact Azure metadata version and "
         "signer-service public key verified; no signing or Apple submission performed."
