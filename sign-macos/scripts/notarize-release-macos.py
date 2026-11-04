@@ -23,7 +23,6 @@ import hashlib
 import http.client
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -42,38 +41,6 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 NOTARY_URL = "https://appstoreconnect.apple.com/notary/v2/submissions"
 SIGNER_ALGORITHM = "SIGNING_ALGORITHM_ECDSA_P256_SHA256"
-
-
-class AzureName(str):
-    """An Azure vault or key name safe to include in a key URL."""
-
-    def __new__(cls, value: str) -> Self:
-        """Reject characters outside Azure vault and key names."""
-        if not re.fullmatch(r"[A-Za-z0-9-]+", value):
-            raise ValueError("Invalid Azure vault or key name")
-        return super().__new__(cls, value)
-
-
-class KeyVersion(str):
-    """An exact Azure metadata key version."""
-
-    def __new__(cls, value: str) -> Self:
-        """Validate and normalize an Azure key version."""
-        if not re.fullmatch(r"[0-9a-fA-F]{32}", value):
-            raise ValueError(
-                "Notarization requires an exact Azure metadata key version"
-            )
-        return super().__new__(cls, value.lower())
-
-
-class SpkiSha256(str):
-    """An independently configured SHA-256 of DER SubjectPublicKeyInfo."""
-
-    def __new__(cls, value: str) -> Self:
-        """Validate and normalize a public-key fingerprint."""
-        if not re.fullmatch(r"[0-9a-fA-F]{64}", value):
-            raise ValueError("Notarization requires an independent SPKI SHA-256 pin")
-        return super().__new__(cls, value.lower())
 
 
 class SignerOrigin(str):
@@ -97,26 +64,25 @@ class Signer:
     endpoint: SignerOrigin
     purpose: str
     key_id: str
-    spki_sha256: SpkiSha256
-    metadata_key_version: KeyVersion
+    # Independently configured SHA-256 of DER SubjectPublicKeyInfo, as hex.
+    spki_sha256: str
+    metadata_key_version: str
 
     @classmethod
     def from_environment(cls) -> "Signer":
-        """Load the signer configuration and validate it through construction."""
+        """Load the signer endpoint, key pins, and Azure metadata version."""
         return cls(
             endpoint=SignerOrigin(os.environ["SIGNER_SERVICE_ENDPOINT"]),
             purpose=os.environ["NOTARIZATION_SIGNER_SERVICE_PURPOSE"],
             key_id=os.environ["NOTARIZATION_SIGNER_SERVICE_KEY_ID"],
-            spki_sha256=SpkiSha256(
-                os.environ["NOTARIZATION_SIGNER_SERVICE_SPKI_SHA256"]
-            ),
-            metadata_key_version=KeyVersion(
-                os.environ["APPLE_NOTARIZATION_AKV_KEY_VERSION"]
-            ),
+            spki_sha256=os.environ["NOTARIZATION_SIGNER_SERVICE_SPKI_SHA256"].lower(),
+            metadata_key_version=os.environ[
+                "APPLE_NOTARIZATION_AKV_KEY_VERSION"
+            ].lower(),
         )
 
-    def metadata_url(self, vault: AzureName, name: AzureName) -> str:
-        """Return the exact Azure metadata URL from validated key components."""
+    def metadata_url(self, vault: str, name: str) -> str:
+        """Return the configured Azure metadata key URL."""
         return (
             f"https://{vault}.vault.azure.net/keys/{name}/{self.metadata_key_version}"
         )
@@ -259,8 +225,8 @@ def azure_json(*arguments: str) -> dict:
 
 def notarization_key() -> NotarizationKey:
     """Resolve Apple metadata, pinned to an exact version for signer-service."""
-    vault = AzureName(os.environ["AZURE_KEYVAULT_NAME"])
-    name = AzureName(os.environ["APPLE_NOTARIZATION_AKV_KEY_NAME"])
+    vault = os.environ["AZURE_KEYVAULT_NAME"]
+    name = os.environ["APPLE_NOTARIZATION_AKV_KEY_NAME"]
     backend = os.environ.get("APPLE_NOTARIZATION_BACKEND", "azure")
     if backend not in {"azure", "signer-service"}:
         raise ValueError("Invalid notarization backend")
