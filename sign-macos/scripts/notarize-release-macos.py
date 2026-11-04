@@ -82,17 +82,8 @@ class SignerOrigin(str):
     def __new__(cls, value: str) -> Self:
         """Validate the signer origin and normalize its authority."""
         endpoint = urlsplit(value)
-        if not (
-            endpoint.scheme == "https"
-            and endpoint.hostname
-            and endpoint.username is None
-            and endpoint.password is None
-            and endpoint.port in (None, 443)
-            and endpoint.path in ("", "/")
-            and not endpoint.query
-            and not endpoint.fragment
-        ):
-            raise ValueError("Notarization requires a signer-service HTTPS origin")
+        if endpoint.scheme != "https" or not endpoint.hostname:
+            raise ValueError("Notarization requires a signer-service HTTPS endpoint")
         host = endpoint.hostname
         return super().__new__(
             cls, f"https://[{host}]" if ":" in host else f"https://{host}"
@@ -208,24 +199,13 @@ class Signer:
 
 def oidc_token(audience: str) -> str:
     """Request a GitHub Actions OIDC token for the signer-service audience."""
-    url = urlsplit(os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", ""))
-    credential = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
-    if not (
-        credential
-        and url.scheme == "https"
-        and url.hostname
-        and url.hostname.endswith(".actions.githubusercontent.com")
-        and url.username is None
-        and url.password is None
-        and url.port in (None, 443)
-        and not url.fragment
-    ):
-        raise ValueError(
-            "A GitHub Actions HTTPS OIDC endpoint and credential are required"
-        )
+    url = urlsplit(os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"])
+    credential = os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+    if url.scheme != "https":
+        raise ValueError("GitHub OIDC requires HTTPS")
     query = [(key, value) for key, value in parse_qsl(url.query) if key != "audience"]
     query.append(("audience", audience))
-    connection = http.client.HTTPSConnection(url.hostname, timeout=15)
+    connection = http.client.HTTPSConnection(url.hostname, port=url.port, timeout=15)
     try:
         # http.client does not follow redirects with the GitHub credential.
         connection.request(
@@ -236,17 +216,7 @@ def oidc_token(audience: str) -> str:
         response = connection.getresponse()
         if response.status != 200:
             raise ValueError(f"GitHub OIDC request returned HTTP {response.status}")
-        body = response.read(65537)
-        if len(body) > 65536:
-            raise ValueError("GitHub OIDC response is oversized")
-        try:
-            data = json.loads(body)
-        except ValueError:
-            raise ValueError("Invalid GitHub OIDC JSON response") from None
-        token = data.get("value") if isinstance(data, dict) else None
-        if not isinstance(token, str) or not token or any(c.isspace() for c in token):
-            raise ValueError("Invalid GitHub OIDC token")
-        return token
+        return json.load(response)["value"]
     except (OSError, http.client.HTTPException):
         # Transport errors may include credentials; validation errors above stay specific.
         raise RuntimeError("GitHub OIDC request failed") from None
