@@ -20,8 +20,10 @@ explicitly configured signer-service key, without exporting the private key.
 import argparse
 import base64
 import hashlib
+import http.client
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -30,14 +32,230 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
-from notary_signer.client import Signer, backend
 
 NOTARY_URL = "https://appstoreconnect.apple.com/notary/v2/submissions"
+SIGNER_ALGORITHM = "SIGNING_ALGORITHM_ECDSA_P256_SHA256"
+
+
+@dataclass(frozen=True)
+class Vault:
+    """An Azure Key Vault name containing only letters, digits, and hyphens."""
+
+    value: str
+
+    def __post_init__(self) -> None:
+        """Reject names that cannot be used in a Key Vault hostname."""
+        if not re.fullmatch(r"[A-Za-z0-9-]+", self.value):
+            raise ValueError("Invalid Azure Key Vault name")
+
+
+@dataclass(frozen=True)
+class KeyName:
+    """An Azure key name containing only letters, digits, and hyphens."""
+
+    value: str
+
+    def __post_init__(self) -> None:
+        """Reject names that cannot be used in a Key Vault key URL."""
+        if not re.fullmatch(r"[A-Za-z0-9-]+", self.value):
+            raise ValueError("Invalid Azure key name")
+
+
+def metadata_url(vault: Vault, name: KeyName, version: str) -> str:
+    """Return the Azure URL for an exact notarization metadata key version."""
+    if not re.fullmatch(r"[0-9a-f]{32}", version):
+        raise ValueError("Notarization requires an exact Azure metadata key version")
+    return f"https://{vault.value}.vault.azure.net/keys/{name.value}/{version}"
+
+
+@dataclass(frozen=True, kw_only=True)
+class Signer:
+    """Signer-service connection and independently configured notarization key pins."""
+
+    hostname: str
+    purpose: str
+    key_id: str
+    # Independently supplied SHA-256 of DER SubjectPublicKeyInfo, as lowercase hex.
+    spki_sha256: str
+
+    @classmethod
+    def from_environment(cls) -> "Signer":
+        """Load the HTTPS endpoint, purpose, key ID, and public-key pin."""
+        endpoint = urlsplit(os.environ.get("SIGNER_SERVICE_ENDPOINT", ""))
+        if not (
+            endpoint.scheme == "https"
+            and endpoint.hostname
+            and endpoint.username is None
+            and endpoint.password is None
+            and endpoint.port in (None, 443)
+            and endpoint.path in ("", "/")
+            and not endpoint.query
+            and not endpoint.fragment
+        ):
+            raise ValueError("Notarization requires a signer-service HTTPS origin")
+        purpose = os.environ["NOTARIZATION_SIGNER_SERVICE_PURPOSE"]
+        key_id = os.environ["NOTARIZATION_SIGNER_SERVICE_KEY_ID"]
+        spki = os.environ["NOTARIZATION_SIGNER_SERVICE_SPKI_SHA256"].lower()
+        if not purpose or not key_id or any(c.isspace() for c in purpose + key_id):
+            raise ValueError(
+                "Notarization requires a signer-service purpose and key ID"
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", spki):
+            raise ValueError("Notarization requires an independent SPKI SHA-256 pin")
+        return cls(
+            hostname=endpoint.hostname, purpose=purpose, key_id=key_id, spki_sha256=spki
+        )
+
+    def validate_public_key(self, token: str) -> None:
+        """Verify that signer-service advertises the pinned ES256 public key."""
+        keys = self.rpc("GetPublicKeys", {"purpose": self.purpose}, token).get(
+            "publicKeys"
+        )
+        if not isinstance(keys, list):
+            raise TypeError("Invalid signer-service public keys")
+        matches = [
+            key
+            for key in keys
+            if isinstance(key, dict) and key.get("keyId") == self.key_id
+        ]
+        if len(matches) != 1 or matches[0].get("algorithm") != SIGNER_ALGORITHM:
+            raise ValueError(
+                "Signer did not return the pinned notarization key and algorithm"
+            )
+        if (
+            hashlib.sha256(decode_bytes(matches[0].get("spkiDer"))).hexdigest()
+            != self.spki_sha256
+        ):
+            raise ValueError("Notarization public key differs from the independent pin")
+
+    def sign_digest(self, digest: bytes) -> bytes:
+        """Sign a SHA-256 digest with the pinned ES256 key and return JOSE bytes."""
+        if len(digest) != 32:
+            raise ValueError("Notarization requires one SHA-256 digest")
+        token = oidc_token(f"https://{self.hostname}")
+        self.validate_public_key(token)
+        result = self.rpc(
+            "Sign",
+            {
+                "purpose": self.purpose,
+                "digest": base64.b64encode(digest).decode("ascii"),
+            },
+            token,
+        )
+        if (
+            result.get("keyId") != self.key_id
+            or result.get("algorithm") != SIGNER_ALGORITHM
+        ):
+            raise ValueError(
+                "Signer returned a different notarization key or algorithm"
+            )
+        signature = decode_bytes(result.get("signature"))
+        if len(signature) != 64:
+            raise ValueError("ES256 signature must contain 64 JOSE R || S bytes")
+        return signature
+
+    def rpc(self, method: str, body: dict, token: str) -> dict:
+        """Call a signer-service RPC and return its decoded JSON response."""
+        try:
+            result = subprocess.run(
+                [
+                    "grpcurl",
+                    "-import-path",
+                    str(Path(__file__).parent / "notary_signer"),
+                    "-proto",
+                    "service.proto",
+                    "-max-time",
+                    "30",
+                    # Expand the token in grpcurl so it never appears in command arguments.
+                    "-expand-headers",
+                    "-rpc-header",
+                    "authorization: Bearer ${NOTARIZATION_OIDC_TOKEN}",
+                    "-d",
+                    "@",
+                    f"{self.hostname}:443",
+                    f"oaiproto.security.signer.v1.SignerService/{method}",
+                ],
+                input=json.dumps(body),
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=35,
+                env={**os.environ, "NOTARIZATION_OIDC_TOKEN": token},
+            )
+        except (OSError, subprocess.SubprocessError):
+            # grpcurl errors can contain authorization headers; do not expose them.
+            raise RuntimeError(f"Signer-service {method} request failed") from None
+        try:
+            response = json.loads(result.stdout)
+        except ValueError:
+            raise ValueError("Invalid signer-service JSON response") from None
+        if not isinstance(response, dict):
+            raise TypeError("Invalid signer-service response")
+        return response
+
+
+def oidc_token(audience: str) -> str:
+    """Request a GitHub Actions OIDC token for the signer-service audience."""
+    url = urlsplit(os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", ""))
+    credential = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+    if not (
+        credential
+        and url.scheme == "https"
+        and url.hostname
+        and url.hostname.endswith(".actions.githubusercontent.com")
+        and url.username is None
+        and url.password is None
+        and url.port in (None, 443)
+        and not url.fragment
+    ):
+        raise ValueError(
+            "A GitHub Actions HTTPS OIDC endpoint and credential are required"
+        )
+    query = [(key, value) for key, value in parse_qsl(url.query) if key != "audience"]
+    query.append(("audience", audience))
+    connection = http.client.HTTPSConnection(url.hostname, timeout=15)
+    try:
+        # http.client does not follow redirects with the GitHub credential.
+        connection.request(
+            "GET",
+            f"{url.path}?{urlencode(query)}",
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+        response = connection.getresponse()
+        if response.status != 200:
+            raise ValueError(f"GitHub OIDC request returned HTTP {response.status}")
+        body = response.read(65537)
+        if len(body) > 65536:
+            raise ValueError("GitHub OIDC response is oversized")
+        try:
+            data = json.loads(body)
+        except ValueError:
+            raise ValueError("Invalid GitHub OIDC JSON response") from None
+        token = data.get("value") if isinstance(data, dict) else None
+        if not isinstance(token, str) or not token or any(c.isspace() for c in token):
+            raise ValueError("Invalid GitHub OIDC token")
+        return token
+    except (OSError, http.client.HTTPException):
+        # Transport errors may include credentials; validation errors above stay specific.
+        raise RuntimeError("GitHub OIDC request failed") from None
+    finally:
+        connection.close()
+
+
+def decode_bytes(value: object) -> bytes:
+    """Decode a protobuf JSON bytes field from standard base64."""
+    if not isinstance(value, str):
+        raise TypeError("Invalid signer-service bytes")
+    try:
+        return base64.b64decode(value, validate=True)
+    except ValueError:
+        raise ValueError("Invalid signer-service base64") from None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -47,8 +265,10 @@ class NotarizationKey:
     # Versioned Azure Key Vault URL used for signing. Azure CLI authenticates
     # requests using the workflow's existing Azure login.
     url: str
+    # App Store Connect identifiers used in the JWT header and claims.
     key_id: str
     issuer: str
+    # When set, signer-service signs JWTs; Azure still supplies Apple account metadata.
     signer: Signer | None = None
 
 
@@ -73,20 +293,27 @@ def azure_json(*arguments: str) -> dict:
 
 def notarization_key() -> NotarizationKey:
     """Resolve Apple metadata, pinned to an exact version for signer-service."""
-    vault = os.environ["AZURE_KEYVAULT_NAME"]
-    name = os.environ["APPLE_NOTARIZATION_AKV_KEY_NAME"]
-    signer = Signer.from_environment() if backend() == "signer-service" else None
-    version = ("--version", signer.metadata_key_version) if signer else ()
-    expected_url = signer.metadata_url(vault, name) if signer else None
+    vault = Vault(os.environ["AZURE_KEYVAULT_NAME"])
+    name = KeyName(os.environ["APPLE_NOTARIZATION_AKV_KEY_NAME"])
+    backend = os.environ.get("APPLE_NOTARIZATION_BACKEND", "azure")
+    if backend not in {"azure", "signer-service"}:
+        raise ValueError("Invalid notarization backend")
+    signer = Signer.from_environment() if backend == "signer-service" else None
+    version = (
+        os.environ.get("APPLE_NOTARIZATION_AKV_KEY_VERSION", "").lower()
+        if signer
+        else ""
+    )
+    expected_url = metadata_url(vault, name, version) if signer else None
     key = azure_json(
         "keyvault",
         "key",
         "show",
         "--vault-name",
-        vault,
+        vault.value,
         "--name",
-        name,
-        *version,
+        name.value,
+        *(("--version", version) if signer else ()),
         "--query",
         '{url:key.kid,key_id:tags."apple-key-id",issuer:tags."apple-issuer-id"}',
     )
@@ -237,12 +464,12 @@ def notarize(signed: Path) -> None:
 
 def preflight() -> None:
     """Check pinned metadata and signer access without signing or contacting Apple."""
-    if backend() != "signer-service":
+    if os.environ.get("APPLE_NOTARIZATION_BACKEND", "azure") != "signer-service":
         raise ValueError("Notarization preflight requires signer-service backend")
     key = notarization_key()
     if key.signer is None:
         raise ValueError("Notarization preflight requires signer-service backend")
-    key.signer.preflight()
+    key.signer.validate_public_key(oidc_token(f"https://{key.signer.hostname}"))
     print(
         "Notarization preflight passed: exact Azure metadata version and "
         "signer-service public key verified; no signing or Apple submission performed."
@@ -273,7 +500,14 @@ def main() -> None:
         if args.signed is None:
             parser.error("signed is required unless preflight is enabled")
         notarize(args.signed)
-    except (KeyError, OSError, ValueError, RuntimeError, TimeoutError) as error:
+    except (
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+        TimeoutError,
+    ) as error:
         parser.exit(1, f"{error}\n")
 
 
