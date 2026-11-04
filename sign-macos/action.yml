@@ -3,7 +3,7 @@ description: "Sign all target directories through the selected PKCS#11 backend a
 
 inputs:
   preflight-only:
-    description: "When true, verify downloads and signer-service key discovery without signing or notarizing. Requires signing-backend: signer-service."
+    description: "When true, verify downloads and selected signer-service keys without signing or submitting to Apple. Requires signing-backend: signer-service; also checks notarization when notarization-backend: signer-service."
     default: "false"
   unsigned-directory:
     description: "Directory containing one subdirectory per target, with that target's executables."
@@ -71,6 +71,21 @@ inputs:
   apple-notarization-akv-key-name:
     description: "Azure Key Vault key for App Store Connect, tagged with apple-key-id and apple-issuer-id."
     required: true
+  notarization-backend:
+    description: "Apple JWT signing backend: azure or signer-service. Independent of signing-backend."
+    default: "azure"
+  apple-notarization-akv-key-version:
+    description: "Exact Azure key version supplying Apple metadata. Required for signer-service notarization."
+    default: ""
+  notarization-signer-service-purpose:
+    description: "Authorized Astral notarization purpose. Required for signer-service notarization."
+    default: ""
+  notarization-signer-service-key-id:
+    description: "Exact notarization key ID matching the pinned Azure metadata key version."
+    default: ""
+  notarization-signer-service-spki-sha256:
+    description: "Independent SHA-256 of the notarization public key's DER SPKI. Required for signer-service notarization."
+    default: ""
 
 runs:
   using: "composite"
@@ -129,11 +144,18 @@ runs:
       run: uv run --locked "$ACTION_PATH/scripts/sign-release-macos.py" "$UNSIGNED_DIRECTORY" "$SIGNED_DIRECTORY"
 
     - name: "Notarize signed macOS executables"
-      if: ${{ inputs.preflight-only != 'true' }}
+      if: ${{ inputs.preflight-only != 'true' || inputs.notarization-backend == 'signer-service' }}
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
         SIGNED_DIRECTORY: ${{ inputs.signed-directory }}
         AZURE_KEYVAULT_NAME: ${{ inputs.azure-keyvault-name }}
         APPLE_NOTARIZATION_AKV_KEY_NAME: ${{ inputs.apple-notarization-akv-key-name }}
+        APPLE_NOTARIZATION_BACKEND: ${{ inputs.notarization-backend }}
+        PREFLIGHT_ONLY: ${{ inputs.preflight-only }}
+        APPLE_NOTARIZATION_AKV_KEY_VERSION: ${{ inputs.apple-notarization-akv-key-version }}
+        SIGNER_SERVICE_ENDPOINT: ${{ inputs.signer-service-endpoint }}
+        NOTARIZATION_SIGNER_SERVICE_PURPOSE: ${{ inputs.notarization-signer-service-purpose }}
+        NOTARIZATION_SIGNER_SERVICE_KEY_ID: ${{ inputs.notarization-signer-service-key-id }}
+        NOTARIZATION_SIGNER_SERVICE_SPKI_SHA256: ${{ inputs.notarization-signer-service-spki-sha256 }}
       run: uv run --locked "$ACTION_PATH/scripts/notarize-release-macos.py" "$SIGNED_DIRECTORY"
