@@ -1,9 +1,25 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 
 [manifest]
-requirements = [{ name = "boto3" }]
+requirements = [
+    { name = "astral-dev-toolchain-grpcurl", specifier = "==1.9.4" },
+    { name = "boto3" },
+]
+
+[[package]]
+name = "astral-dev-toolchain-grpcurl"
+version = "1.9.4"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/94/17/2d176f66000b518541de2a35b3aac8db3bd5a128157f785651eb5f720d1f/astral_dev_toolchain_grpcurl-1.9.4-py3-none-macosx_13_0_arm64.whl", hash = "sha256:ea5b157aa50d6d909c40e5b4077a1654be5e223ea651bc486e65bae42aa07bec", size = 9590795, upload-time = "2026-11-04T15:53:08.863Z" },
+    { url = "https://files.pythonhosted.org/packages/13/bf/89dc211d4ca3c9419a4a49934313c46231e9df6d9a867e41a399ea910a5e/astral_dev_toolchain_grpcurl-1.9.4-py3-none-macosx_13_0_x86_64.whl", hash = "sha256:5282725086254f3cfa5413ef8c3f49fd3eb0877612f2e761b94e7e96537fbb79", size = 10133677, upload-time = "2026-11-04T15:53:11.351Z" },
+    { url = "https://files.pythonhosted.org/packages/70/07/906ea46d6dfbb611f971b1b310d142e28a074777af20a4c7a3c3f0c9d3cb/astral_dev_toolchain_grpcurl-1.9.4-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:23874c349d56a979a5609eb183b40f94de35ed286a633494e32e4632fb3db324", size = 9086650, upload-time = "2026-11-04T15:53:13.72Z" },
+    { url = "https://files.pythonhosted.org/packages/bf/4b/5b5804b77f6c1edab632107e2bf2721e0ace89ce68df10cdac02910113b5/astral_dev_toolchain_grpcurl-1.9.4-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:236715992cc983c4aaba8ae7e7334f20a58c8cf8cea27897ae0736640a8b6137", size = 10122339, upload-time = "2026-11-04T15:53:16.406Z" },
+    { url = "https://files.pythonhosted.org/packages/22/c0/a56c467eb9bb1b6714dafdb63b5b8ea4e7a11512d241ee179a5e1df9e225/astral_dev_toolchain_grpcurl-1.9.4-py3-none-win_amd64.whl", hash = "sha256:0a12aa4e01908a60cec3f5b69c361d42467bcc92c1c2869562db730ee0a4ea24", size = 10322302, upload-time = "2026-11-04T15:53:18.635Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/3c/f890d133195ca9c66d07bf94e46a3e02647220fd0280635c33a30e7ee704/astral_dev_toolchain_grpcurl-1.9.4-py3-none-win_arm64.whl", hash = "sha256:ad19ede2375674f6f3a4f1fff40a6b9459fde754476b8073a898f622fb43f0ac", size = 9199367, upload-time = "2026-11-04T15:53:21.249Z" },
+]
 
 [[package]]
 name = "boto3"
