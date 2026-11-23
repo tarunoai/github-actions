@@ -46,19 +46,42 @@ SIGNER_ALGORITHM = "SIGNING_ALGORITHM_ECDSA_P256_SHA256"
 class Signer:
     """Signer-service configuration pinned to an exact Apple metadata key version."""
 
-    hostname: str
+    endpoint: str
     purpose: str
     key_id: str
     # Independently configured SHA-256 of DER SubjectPublicKeyInfo, as hex.
     spki_sha256: str
     metadata_key_version: str
 
+    def __post_init__(self) -> None:
+        """Reject incomplete key pins and endpoints that are not HTTPS origins."""
+        endpoint = urlsplit(self.endpoint)
+        if (
+            endpoint.scheme != "https"
+            or not endpoint.hostname
+            or endpoint.port not in (None, 443)
+            or endpoint.username is not None
+            or endpoint.path not in ("", "/")
+            or endpoint.query
+            or endpoint.fragment
+        ):
+            raise ValueError("Signer-service endpoint must be an HTTPS origin")
+        if not all((self.purpose, self.key_id, self.metadata_key_version)):
+            raise ValueError("Incomplete signer-service notarization configuration")
+        if len(bytes.fromhex(self.spki_sha256)) != 32:
+            raise ValueError("Invalid notarization public key SHA-256")
+
+    @property
+    def hostname(self) -> str:
+        """Return the validated hostname in gRPC address form."""
+        hostname = urlsplit(self.endpoint).hostname
+        return f"[{hostname}]" if ":" in hostname else hostname
+
     @classmethod
     def from_environment(cls) -> "Signer":
         """Load the signer endpoint, key pins, and Azure metadata version."""
-        hostname = urlsplit(os.environ["SIGNER_SERVICE_ENDPOINT"]).hostname
         return cls(
-            hostname=f"[{hostname}]" if ":" in hostname else hostname,
+            endpoint=os.environ["SIGNER_SERVICE_ENDPOINT"],
             purpose=os.environ["NOTARIZATION_SIGNER_SERVICE_PURPOSE"],
             key_id=os.environ["NOTARIZATION_SIGNER_SERVICE_KEY_ID"],
             spki_sha256=os.environ["NOTARIZATION_SIGNER_SERVICE_SPKI_SHA256"].lower(),
@@ -67,8 +90,9 @@ class Signer:
             ].lower(),
         )
 
-    def validate_public_key(self, token: str) -> None:
-        """Verify that signer-service advertises the pinned ES256 public key."""
+    def sign_digest(self, digest: bytes) -> bytes:
+        """Verify the pinned ES256 key, then sign a digest with that key."""
+        token = oidc_token(f"https://{self.hostname}")
         keys = self.rpc("GetPublicKeys", {"purpose": self.purpose}, token).get(
             "publicKeys", []
         )
@@ -85,10 +109,6 @@ class Signer:
         ):
             raise ValueError("Notarization public key differs from the independent pin")
 
-    def sign_digest(self, digest: bytes) -> bytes:
-        """Sign a SHA-256 digest with the pinned ES256 key and return JOSE bytes."""
-        token = oidc_token(f"https://{self.hostname}")
-        self.validate_public_key(token)
         result = self.rpc(
             "Sign",
             {
@@ -104,7 +124,10 @@ class Signer:
             raise ValueError(
                 "Signer returned a different notarization key or algorithm"
             )
-        return base64.b64decode(result["signature"], validate=True)
+        signature = base64.b64decode(result["signature"], validate=True)
+        if len(signature) != 64:
+            raise ValueError("Signer returned an invalid ES256 signature")
+        return signature
 
     def rpc(self, method: str, body: dict, token: str) -> dict:
         """Call a signer-service RPC and return its decoded JSON response."""
