@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package oaiproto.security.signer.v1;
+
+enum SigningAlgorithm {
+  SIGNING_ALGORITHM_UNSPECIFIED = 0;
+  SIGNING_ALGORITHM_ECDSA_P256_SHA256 = 3;
+}
+
+message SignRequest {
+  string purpose = 1;
+  bytes digest = 3;
+}
+
+message SignResponse {
+  bytes signature = 1;
+  string key_id = 2;
+  SigningAlgorithm algorithm = 3;
+}
+
+message GetPublicKeysRequest {
+  string purpose = 1;
+}
+
+message VerificationKey {
+  string key_id = 2;
+  bytes spki_der = 3;
+  SigningAlgorithm algorithm = 4;
+}
+
+message GetPublicKeysResponse {
+  repeated VerificationKey public_keys = 1;
+}
+
+service SignerService {
+  rpc Sign(SignRequest) returns (SignResponse);
+  rpc GetPublicKeys(GetPublicKeysRequest) returns (GetPublicKeysResponse);
+}
