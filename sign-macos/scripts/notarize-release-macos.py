@@ -67,12 +67,6 @@ class Signer:
             ].lower(),
         )
 
-    def metadata_url(self, vault: str, name: str) -> str:
-        """Return the configured Azure metadata key URL."""
-        return (
-            f"https://{vault}.vault.azure.net/keys/{name}/{self.metadata_key_version}"
-        )
-
     def validate_public_key(self, token: str) -> None:
         """Verify that signer-service advertises the pinned ES256 public key."""
         keys = self.rpc("GetPublicKeys", {"purpose": self.purpose}, token).get(
@@ -224,8 +218,6 @@ def notarization_key() -> NotarizationKey:
         "--query",
         '{url:key.kid,key_id:tags."apple-key-id",issuer:tags."apple-issuer-id"}',
     )
-    if signer and key["url"] != signer.metadata_url(vault, name):
-        raise ValueError("Azure returned a different notarization metadata key version")
     return NotarizationKey(
         url=key["url"], key_id=key["key_id"], issuer=key["issuer"], signer=signer
     )
