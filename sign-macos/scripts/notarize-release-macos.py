@@ -23,6 +23,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -68,6 +69,10 @@ class Signer:
             raise ValueError("Signer-service endpoint must be an HTTPS origin")
         if not all((self.purpose, self.key_id, self.metadata_key_version)):
             raise ValueError("Incomplete signer-service notarization configuration")
+        if not re.fullmatch(r"[0-9a-f]{32}", self.metadata_key_version):
+            raise ValueError(
+                "Notarization requires an exact Azure metadata key version"
+            )
         if len(bytes.fromhex(self.spki_sha256)) != 32:
             raise ValueError("Invalid notarization public key SHA-256")
 
@@ -261,10 +266,9 @@ def apple_token(key: NotarizationKey) -> str:
         base64url(json.dumps(value, separators=(",", ":")).encode())
         for value in (header, claims)
     )
+    digest = hashlib.sha256(signing_input.encode("ascii")).digest()
     if key.signer:
-        signature = key.signer.sign_digest(
-            hashlib.sha256(signing_input.encode("ascii")).digest()
-        )
+        signature = key.signer.sign_digest(digest)
         return f"{signing_input}.{base64url(signature)}"
     signature = azure_json(
         "rest",
@@ -280,9 +284,7 @@ def apple_token(key: NotarizationKey) -> str:
         json.dumps(
             {
                 "alg": "ES256",
-                "value": base64url(
-                    hashlib.sha256(signing_input.encode("ascii")).digest()
-                ),
+                "value": base64url(digest),
             }
         ),
     )
